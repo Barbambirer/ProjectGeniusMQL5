@@ -15,9 +15,10 @@
 // --- ВХОДНЫЕ ПАРАМЕТРЫ ---
 input double InpLot          = 0.01; 
 input double InpTakeProfit   = 5.0;  
-input int    InpMaxSpread    = 20;   
-input int    InpStartHour    = 4;    
-input int    InpEndHour      = 23;
+input int    InpMaxSpread       = 20;
+input int    InpStartHour       = 4;
+input int    InpEndHour         = 23;
+input double InpSignalThreshold = 20.0; // <--- НОВЫЙ ПАРАМЕТР (Поставь 20 для теста)
 
 // Новые фильтры дальности (твоя идея)
 input int    InpMinDistance  = 10;   // Мин. отступ от открытия (чтобы не флэт)
@@ -113,9 +114,12 @@ bool CheckDistance(string direction)
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
 void OnTick()
   {
-   // --- 1. СБОР ДАННЫХ (Делаем это всегда, чтобы видеть глазами) ---
+   // --- 1. СБОР ДАННЫХ ---
    
    // Время
    MqlDateTime dt; 
@@ -124,8 +128,10 @@ void OnTick()
    // Спред
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    
-   // Данные индикатора (дергаем их принудительно, чтобы видеть цифры)
-   ENUM_SIGNAL_TYPE sig = Signal.CheckSignal(); 
+   // Данные индикатора
+   // ВАЖНО: Передаем порог (InpSignalThreshold) сразу здесь!
+   // Чтобы переменная sig и текст indDebug сразу учитывали твои настройки.
+   ENUM_SIGNAL_TYPE sig = Signal.CheckSignal(InpSignalThreshold); 
    string indDebug = Signal.GetDebugString();
 
    // --- 2. ФОРМИРУЕМ СТАТУС ДЛЯ ЭКРАНА ---
@@ -133,14 +139,14 @@ void OnTick()
    if(dt.hour < InpStartHour || dt.hour >= InpEndHour) status = "SLEEPING (Time)";
    else if(spread > InpMaxSpread)                      status = "FILTER (Spread)";
    
-   // --- 3. ВЫВОД НА ЭКРАН (ВСЕГДА!) ---
-   // Теперь ты будешь видеть это в ЛЮБОМ случае
+   // --- 3. ВЫВОД НА ЭКРАН ---
    Comment("=== GENIUS MONITOR ===",
            "\nStatus:  ", status,
            "\nTime:    ", dt.hour, ":", dt.min, " (Start: ", InpStartHour, ")",
            "\nSpread:  ", spread, " (Max: ", InpMaxSpread, ")",
            "\n---------------------",
            "\nSignal:  ", indDebug,
+           "\nThreshold: ", InpSignalThreshold,
            "\n---------------------",
            "\nSeries State: ", EnumToString(CurrentSeries.state),
            "\nSeries Profit: ", CalculateSeriesFloatingProfit()
@@ -148,18 +154,17 @@ void OnTick()
 
    // --- 4. ЛОГИКА ТОРГОВЛИ ---
    
-   // Если фильтры активны - выходим ПОСЛЕ отрисовки экрана
    if(status != "ACTIVE" && CurrentSeries.state == STATE_WAIT_SIGNAL) return;
 
-   // Машина состояний
    switch(CurrentSeries.state)
      {
       case STATE_WAIT_SIGNAL:
         {
-         // Сигнал мы уже получили выше (переменная sig)
-         if(sig == SIGNAL_BUY)
+         // Мы уже получили сигнал выше (в переменной sig)
+         
+         if(sig == SIGNAL_BUY) // <--- ВОТ ЭТОГО НЕ ХВАТАЛО
            {
-            // Проверяем твой фильтр дальности
+            // Проверяем фильтр дальности
             if(CheckDistance("BUY"))
               {
                if(TradeManager.OpenBuy(InpLot, _Symbol)) StartNewSeries();
