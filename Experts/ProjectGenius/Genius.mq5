@@ -3,48 +3,40 @@
 //|                                                    ProjectGenius |
 //+------------------------------------------------------------------+
 #property copyright "Gorizont"
-#property version   "1.07"
+#property version   "1.08"
 
 #include <ProjectGenius\Defines.mqh>
 #include <ProjectGenius\CsvWriter.mqh>
 #include <ProjectGenius\DataStructs.mqh>
 #include <ProjectGenius\StateService.mqh>
 #include <ProjectGenius\TradeManager.mqh>
-#include <ProjectGenius\SignalService.mqh>
+// #include <ProjectGenius\SignalService.mqh> // Пока отключим, логику пишем тут
 
 // --- ВХОДНЫЕ ПАРАМЕТРЫ ---
-input double InpLot        = 0.01; // Стартовый лот
-input double InpTakeProfit = 5.0;  // Цель в деньгах ($)
-input int    InpMaxSpread  = 14;   // Максимальный спред (в пунктах терминала)
-input int    InpStartHour  = 4;    // Час начала торговли
-input int    InpEndHour    = 23;   // Час окончания торговли (до 23:00)
+input double InpLot        = 0.01; 
+input double InpTakeProfit = 5.0;  
+input int    InpMaxSpread  = 20;   // Чуть увеличил для теста
+input int    InpStartHour  = 4;    // Старт в 04:00
+input int    InpEndHour    = 23;   
 
 // --- ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ---
 CCsvWriter     Writer;
 TSeriesData    CurrentSeries;
 CStateService  StateService("state.csv");
 CTradeManager  TradeManager;
-CSignalService Signal;
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Init                                                             |
 //+------------------------------------------------------------------+
 int OnInit()
   {
-   Print("Genius: Инициализация...");
    TradeManager.Init(EXPERT_MAGIC);
-   
-   if(!Signal.Init(_Symbol, _Period)) return(INIT_FAILED);
-
-   if(!StateService.Load(CurrentSeries))
-     {
-      CurrentSeries.Reset();
-     }
+   if(!StateService.Load(CurrentSeries)) CurrentSeries.Reset();
    return(INIT_SUCCEEDED);
   }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                 |
+//| Deinit                                                           |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
@@ -52,32 +44,8 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
-//| ПРОВЕРКА ФИЛЬТРОВ (Время + Спред)                                |
+//| Start Series                                                     |
 //+------------------------------------------------------------------+
-bool CheckFilters()
-  {
-   // 1. Проверка времени
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   
-   // Если час меньше старта ИЛИ больше либо равен концу -> выход запрещен
-   if(dt.hour < InpStartHour || dt.hour >= InpEndHour)
-     {
-      return(false); // Не торговое время
-     }
-
-   // 2. Проверка спреда
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(spread > InpMaxSpread)
-     {
-      // Можно выводить в коммент, чтобы видеть, почему молчим
-      // Comment("Filter: Spread too high: ", spread);
-      return(false);
-     }
-     
-   return(true);
-  }
-
 void StartNewSeries()
   {
    CurrentSeries.state       = STATE_IN_SERIES;
@@ -88,83 +56,116 @@ void StartNewSeries()
   }
 
 //+------------------------------------------------------------------+
-//| Подсчет текущей плавающей прибыли серии                          |
+//| Profit Calc (Исправленная версия)                                |
 //+------------------------------------------------------------------+
 double CalculateSeriesFloatingProfit()
   {
    double profit = 0.0;
    int total = PositionsTotal();
-   
    for(int i = 0; i < total; i++)
      {
       ulong ticket = PositionGetTicket(i);
-      // Проверяем, что ордер принадлежит нашему советнику (Magic)
       if(PositionGetInteger(POSITION_MAGIC) == EXPERT_MAGIC)
         {
-         // Суммируем чистую прибыль и своп
          profit += PositionGetDouble(POSITION_PROFIT);
          profit += PositionGetDouble(POSITION_SWAP);
-         
-         // POSITION_COMMISSION убрали, так как она устарела.
-         // На большинстве счетов она уже учтена в балансе или не видна в позициях.
         }
      }
    return(profit);
   }
+
 //+------------------------------------------------------------------+
-//| Expert tick function                                             |
+//| Логика фильтров и времени                                        |
+//+------------------------------------------------------------------+
+bool CheckFiltersAndGetSignal(string &signalType)
+  {
+   signalType = "NONE";
+
+   // 1. Время сервера
+   MqlDateTime dt;
+   TimeCurrent(dt);
+   
+   // --- ТОЧКА ОСТАНОВА 1 (Поставь сюда курсор и нажми F9) ---
+   // Здесь ты увидишь dt.hour. Если оно < 4, мы выйдем.
+   
+   if(dt.hour < InpStartHour || dt.hour >= InpEndHour) 
+      return(false); // Спим
+
+   // 2. Спред
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   if(spread > InpMaxSpread) 
+      return(false); // Спред большой
+
+   // 3. ЛОГИКА "ОТ УРОВНЯ ДНЯ"
+   // Получаем цену открытия текущего дня (D1, бар 0)
+   double dayOpen = iOpen(_Symbol, PERIOD_D1, 0);
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // --- ТОЧКА ОСТАНОВА 2 ---
+   // Смотри значения dayOpen и currentBid
+   
+   if(currentBid > dayOpen + 10*_Point) // Цена выше открытия на 10 пунктов?
+     {
+      signalType = "BUY";
+      return(true);
+     }
+   
+   if(currentBid < dayOpen - 10*_Point) // Цена ниже открытия на 10 пунктов?
+     {
+      signalType = "SELL";
+      return(true);
+     }
+
+   return(false); // Время рабочее, но цена топчется на открытии
+  }
+
+//+------------------------------------------------------------------+
+//| OnTick                                                           |
 //+------------------------------------------------------------------+
 void OnTick()
   {
    switch(CurrentSeries.state)
      {
-      // --- ОЖИДАНИЕ ---
       case STATE_WAIT_SIGNAL:
         {
-         // 1. Сначала проверяем фильтры (чтобы не дергать индикатор зря)
-         if(!CheckFilters())
+         string signal = "";
+         // Проверяем всё в одной функции (удобно для отладки)
+         if(CheckFiltersAndGetSignal(signal))
            {
-            Comment("State: WAIT (Filter Active)\nTime: ", InpStartHour, "-", InpEndHour, 
-                    "\nMaxSpread: ", InpMaxSpread, " Current: ", SymbolInfoInteger(_Symbol, SYMBOL_SPREAD));
-            return;
+            if(signal == "BUY")
+              {
+               Print("Genius: Пробой вверх! Покупаем.");
+               if(TradeManager.OpenBuy(InpLot, _Symbol)) StartNewSeries();
+              }
+            else if(signal == "SELL")
+              {
+               Print("Genius: Пробой вниз! Продаем.");
+               if(TradeManager.OpenSell(InpLot, _Symbol)) StartNewSeries();
+              }
            }
-        
-         // 2. Если фильтры пройдены, смотрим сигнал
-         ENUM_SIGNAL_TYPE sig = Signal.CheckSignal();
-         Comment("State: WAIT (Searching)\n", Signal.GetDebugString());
-
-         if(sig == SIGNAL_BUY)
+         else
            {
-            if(TradeManager.OpenBuy(InpLot, _Symbol)) StartNewSeries();
-           }
-         else if(sig == SIGNAL_SELL)
-           {
-            if(TradeManager.OpenSell(InpLot, _Symbol)) StartNewSeries();
+            // Для визуализации в тестере
+            MqlDateTime dt; TimeCurrent(dt);
+            Comment("State: WAIT\nHour: ", dt.hour, "\nSignal: NONE");
            }
          break;
         }
 
-      // --- В РАБОТЕ ---
       case STATE_IN_SERIES:
         {
-         double currentProfit = CalculateSeriesFloatingProfit();
-         
-         // Показываем статистику
-         Comment("State: IN SERIES\nOrders: ", PositionsTotal(), "\nProfit: ", DoubleToString(currentProfit, 2));
+         double profit = CalculateSeriesFloatingProfit();
+         Comment("State: IN SERIES\nProfit: ", DoubleToString(profit, 2));
 
-         // Выход по Тейку
-         if(currentProfit >= InpTakeProfit)
+         if(profit >= InpTakeProfit)
            {
-            Print("Genius: Тейк-профит достигнут! $", currentProfit);
             TradeManager.CloseAll("TP Reached");
-            CurrentSeries.netProfit = currentProfit;
             CurrentSeries.state = STATE_FINISHED;
             StateService.Save(CurrentSeries);
            }
          break;
         }
 
-      // --- ЗАВЕРШЕНО ---
       case STATE_FINISHED:
         {
          CurrentSeries.Reset();
