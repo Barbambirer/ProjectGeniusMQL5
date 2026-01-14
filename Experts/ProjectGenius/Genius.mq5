@@ -110,71 +110,82 @@ bool CheckDistance(string direction)
      
    return(true);
   }
-
-//+------------------------------------------------------------------+
-//| Expert tick function                                             |
-//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
   {
    // --- 1. СБОР ДАННЫХ ---
-   
-   // Время
-   MqlDateTime dt; 
-   TimeCurrent(dt);
-   
-   // Спред
+   MqlDateTime dt; TimeCurrent(dt);
    long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
    
-   // Данные индикатора
-   // ВАЖНО: Передаем порог (InpSignalThreshold) сразу здесь!
-   // Чтобы переменная sig и текст indDebug сразу учитывали твои настройки.
+   // Получаем сигнал и строку отладки
    ENUM_SIGNAL_TYPE sig = Signal.CheckSignal(InpSignalThreshold); 
    string indDebug = Signal.GetDebugString();
 
-   // --- 2. ФОРМИРУЕМ СТАТУС ДЛЯ ЭКРАНА ---
+   // --- 2. ЭКРАН ---
    string status = "ACTIVE";
    if(dt.hour < InpStartHour || dt.hour >= InpEndHour) status = "SLEEPING (Time)";
    else if(spread > InpMaxSpread)                      status = "FILTER (Spread)";
    
-   // --- 3. ВЫВОД НА ЭКРАН ---
-   Comment("=== GENIUS MONITOR ===",
+   Comment("=== GENIUS DEBUG ===",
            "\nStatus:  ", status,
-           "\nTime:    ", dt.hour, ":", dt.min, " (Start: ", InpStartHour, ")",
-           "\nSpread:  ", spread, " (Max: ", InpMaxSpread, ")",
-           "\n---------------------",
+           "\nTime:    ", dt.hour, ":", dt.min,
+           "\nSpread:  ", spread, 
            "\nSignal:  ", indDebug,
            "\nThreshold: ", InpSignalThreshold,
-           "\n---------------------",
-           "\nSeries State: ", EnumToString(CurrentSeries.state),
-           "\nSeries Profit: ", CalculateSeriesFloatingProfit()
+           "\nState: ", EnumToString(CurrentSeries.state)
            );
 
-   // --- 4. ЛОГИКА ТОРГОВЛИ ---
+   // --- 3. ЛОГИКА ---
    
+   // Если спим - выходим
    if(status != "ACTIVE" && CurrentSeries.state == STATE_WAIT_SIGNAL) return;
 
    switch(CurrentSeries.state)
      {
       case STATE_WAIT_SIGNAL:
         {
-         // Мы уже получили сигнал выше (в переменной sig)
-         
-         if(sig == SIGNAL_BUY) // <--- ВОТ ЭТОГО НЕ ХВАТАЛО
+         // ПРОВЕРКА: Почему не входим?
+         if(sig == SIGNAL_NONE) 
            {
-            // Проверяем фильтр дальности
+            // Это нормально, сигнала просто нет
+            return; 
+           }
+           
+         if(sig == SIGNAL_WAIT_EXHAUSTED)
+           {
+            Print("Genius: Сигнал пропущен (Рынок выдохся > 50%)");
+            return;
+           }
+
+         // Если мы здесь - значит сигнал ЕСТЬ (BUY или SELL)
+         // Проверяем фильтр дистанции
+         
+         if(sig == SIGNAL_BUY)
+           {
+            Print("Genius: ЕСТЬ СИГНАЛ BUY! Проверяем дистанцию...");
             if(CheckDistance("BUY"))
               {
+               Print("Genius: Дистанция ОК! Пытаюсь открыть BUY...");
                if(TradeManager.OpenBuy(InpLot, _Symbol)) StartNewSeries();
+              }
+            else
+              {
+               Print("Genius: Отказ по дистанции (слишком близко или далеко).");
               }
            }
          else if(sig == SIGNAL_SELL)
            {
+            Print("Genius: ЕСТЬ СИГНАЛ SELL! Проверяем дистанцию...");
             if(CheckDistance("SELL"))
               {
+               Print("Genius: Дистанция ОК! Пытаюсь открыть SELL...");
                if(TradeManager.OpenSell(InpLot, _Symbol)) StartNewSeries();
+              }
+            else
+              {
+               Print("Genius: Отказ по дистанции.");
               }
            }
          break;
@@ -183,7 +194,6 @@ void OnTick()
       case STATE_IN_SERIES:
         {
          double profit = CalculateSeriesFloatingProfit();
-         
          if(profit >= InpTakeProfit)
            {
             TradeManager.CloseAll("TP Reached");
