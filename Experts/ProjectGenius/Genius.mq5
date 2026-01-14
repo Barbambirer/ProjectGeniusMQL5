@@ -3,27 +3,32 @@
 //|                                                    ProjectGenius |
 //+------------------------------------------------------------------+
 #property copyright "Gorizont"
-#property version   "1.08"
+#property version   "1.09"
 
 #include <ProjectGenius\Defines.mqh>
 #include <ProjectGenius\CsvWriter.mqh>
 #include <ProjectGenius\DataStructs.mqh>
 #include <ProjectGenius\StateService.mqh>
 #include <ProjectGenius\TradeManager.mqh>
-// #include <ProjectGenius\SignalService.mqh> // Пока отключим, логику пишем тут
+#include <ProjectGenius\SignalService.mqh> // <--- ВЕРНУЛИ
 
 // --- ВХОДНЫЕ ПАРАМЕТРЫ ---
-input double InpLot        = 0.01; 
-input double InpTakeProfit = 5.0;  
-input int    InpMaxSpread  = 20;   // Чуть увеличил для теста
-input int    InpStartHour  = 4;    // Старт в 04:00
-input int    InpEndHour    = 23;   
+input double InpLot          = 0.01; 
+input double InpTakeProfit   = 5.0;  
+input int    InpMaxSpread    = 20;   
+input int    InpStartHour    = 4;    
+input int    InpEndHour      = 23;
+
+// Новые фильтры дальности (твоя идея)
+input int    InpMinDistance  = 10;   // Мин. отступ от открытия (чтобы не флэт)
+input int    InpMaxDistance  = 200;  // Макс. отступ (если больше - значит улетели, не входим)
 
 // --- ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ---
 CCsvWriter     Writer;
 TSeriesData    CurrentSeries;
 CStateService  StateService("state.csv");
 CTradeManager  TradeManager;
+CSignalService Signal; // <--- ВЕРНУЛИ
 
 //+------------------------------------------------------------------+
 //| Init                                                             |
@@ -31,7 +36,12 @@ CTradeManager  TradeManager;
 int OnInit()
   {
    TradeManager.Init(EXPERT_MAGIC);
+   
+   // Инициализируем индикатор
+   if(!Signal.Init(_Symbol, _Period)) return(INIT_FAILED);
+
    if(!StateService.Load(CurrentSeries)) CurrentSeries.Reset();
+   
    return(INIT_SUCCEEDED);
   }
 
@@ -56,7 +66,7 @@ void StartNewSeries()
   }
 
 //+------------------------------------------------------------------+
-//| Profit Calc (Исправленная версия)                                |
+//| Profit Calc                                                      |
 //+------------------------------------------------------------------+
 double CalculateSeriesFloatingProfit()
   {
@@ -71,83 +81,96 @@ double CalculateSeriesFloatingProfit()
          profit += PositionGetDouble(POSITION_SWAP);
         }
      }
-   return(profit);
+   // Округляем прибыль до 2 знаков для красоты
+   return(NormalizeDouble(profit, 2));
   }
 
 //+------------------------------------------------------------------+
-//| Логика фильтров и времени                                        |
+//| Проверка дистанции от Open Day                                   |
 //+------------------------------------------------------------------+
-bool CheckFiltersAndGetSignal(string &signalType)
+bool CheckDistance(string direction)
   {
-   signalType = "NONE";
-
-   // 1. Время сервера
-   MqlDateTime dt;
-   TimeCurrent(dt);
-   
-   // --- ТОЧКА ОСТАНОВА 1 (Поставь сюда курсор и нажми F9) ---
-   // Здесь ты увидишь dt.hour. Если оно < 4, мы выйдем.
-   
-   if(dt.hour < InpStartHour || dt.hour >= InpEndHour) 
-      return(false); // Спим
-
-   // 2. Спред
-   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-   if(spread > InpMaxSpread) 
-      return(false); // Спред большой
-
-   // 3. ЛОГИКА "ОТ УРОВНЯ ДНЯ"
-   // Получаем цену открытия текущего дня (D1, бар 0)
    double dayOpen = iOpen(_Symbol, PERIOD_D1, 0);
-   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double currentPrice = (direction == "BUY") ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
    
-   // --- ТОЧКА ОСТАНОВА 2 ---
-   // Смотри значения dayOpen и currentBid
+   // Считаем дистанцию в Пунктах (Points)
+   double diffPoints = MathAbs(currentPrice - dayOpen) / _Point;
    
-   if(currentBid > dayOpen + 10*_Point) // Цена выше открытия на 10 пунктов?
+   // 1. Если цена слишком близко к открытию (флэт)
+   if(diffPoints < InpMinDistance) return(false);
+   
+   // 2. Если цена улетела в космос (твоя стратегия "не покупать на хаях")
+   if(diffPoints > InpMaxDistance) 
      {
-      signalType = "BUY";
-      return(true);
+      // Можно вывести в лог, что мы пропускаем вход
+      // Print("Genius: Фильтр! Цена улетела на ", diffPoints, " пт. Ждем откат.");
+      return(false);
      }
-   
-   if(currentBid < dayOpen - 10*_Point) // Цена ниже открытия на 10 пунктов?
-     {
-      signalType = "SELL";
-      return(true);
-     }
-
-   return(false); // Время рабочее, но цена топчется на открытии
+     
+   return(true);
   }
 
 //+------------------------------------------------------------------+
-//| OnTick                                                           |
+//| Expert tick function                                             |
 //+------------------------------------------------------------------+
 void OnTick()
   {
+   // --- 1. СБОР ДАННЫХ (Делаем это всегда, чтобы видеть глазами) ---
+   
+   // Время
+   MqlDateTime dt; 
+   TimeCurrent(dt);
+   
+   // Спред
+   long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+   
+   // Данные индикатора (дергаем их принудительно, чтобы видеть цифры)
+   ENUM_SIGNAL_TYPE sig = Signal.CheckSignal(); 
+   string indDebug = Signal.GetDebugString();
+
+   // --- 2. ФОРМИРУЕМ СТАТУС ДЛЯ ЭКРАНА ---
+   string status = "ACTIVE";
+   if(dt.hour < InpStartHour || dt.hour >= InpEndHour) status = "SLEEPING (Time)";
+   else if(spread > InpMaxSpread)                      status = "FILTER (Spread)";
+   
+   // --- 3. ВЫВОД НА ЭКРАН (ВСЕГДА!) ---
+   // Теперь ты будешь видеть это в ЛЮБОМ случае
+   Comment("=== GENIUS MONITOR ===",
+           "\nStatus:  ", status,
+           "\nTime:    ", dt.hour, ":", dt.min, " (Start: ", InpStartHour, ")",
+           "\nSpread:  ", spread, " (Max: ", InpMaxSpread, ")",
+           "\n---------------------",
+           "\nSignal:  ", indDebug,
+           "\n---------------------",
+           "\nSeries State: ", EnumToString(CurrentSeries.state),
+           "\nSeries Profit: ", CalculateSeriesFloatingProfit()
+           );
+
+   // --- 4. ЛОГИКА ТОРГОВЛИ ---
+   
+   // Если фильтры активны - выходим ПОСЛЕ отрисовки экрана
+   if(status != "ACTIVE" && CurrentSeries.state == STATE_WAIT_SIGNAL) return;
+
+   // Машина состояний
    switch(CurrentSeries.state)
      {
       case STATE_WAIT_SIGNAL:
         {
-         string signal = "";
-         // Проверяем всё в одной функции (удобно для отладки)
-         if(CheckFiltersAndGetSignal(signal))
+         // Сигнал мы уже получили выше (переменная sig)
+         if(sig == SIGNAL_BUY)
            {
-            if(signal == "BUY")
+            // Проверяем твой фильтр дальности
+            if(CheckDistance("BUY"))
               {
-               Print("Genius: Пробой вверх! Покупаем.");
                if(TradeManager.OpenBuy(InpLot, _Symbol)) StartNewSeries();
               }
-            else if(signal == "SELL")
+           }
+         else if(sig == SIGNAL_SELL)
+           {
+            if(CheckDistance("SELL"))
               {
-               Print("Genius: Пробой вниз! Продаем.");
                if(TradeManager.OpenSell(InpLot, _Symbol)) StartNewSeries();
               }
-           }
-         else
-           {
-            // Для визуализации в тестере
-            MqlDateTime dt; TimeCurrent(dt);
-            Comment("State: WAIT\nHour: ", dt.hour, "\nSignal: NONE");
            }
          break;
         }
@@ -155,8 +178,7 @@ void OnTick()
       case STATE_IN_SERIES:
         {
          double profit = CalculateSeriesFloatingProfit();
-         Comment("State: IN SERIES\nProfit: ", DoubleToString(profit, 2));
-
+         
          if(profit >= InpTakeProfit)
            {
             TradeManager.CloseAll("TP Reached");
@@ -174,4 +196,3 @@ void OnTick()
         }
      }
   }
-//+------------------------------------------------------------------+
